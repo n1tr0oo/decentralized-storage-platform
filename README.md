@@ -14,7 +14,7 @@ Truffle (for working with Solidity contracts)
 Setup Steps
 Clone the Repository
 
-git clone https://github.com/yourusername/decentralized-storage-platform.git
+git clone https://github.com/n1tr0oo/decentralized-storage-platform.git
 cd decentralized-storage-platform
 Install Dependencies
 
