@@ -118,6 +118,17 @@ contract StoragePlatform {
         return userFiles;
     }
 
+    // Solidity: Добавьте эту функцию в смарт-контракт
+    function getFileData(string memory fileHash) public view returns (string memory encryptedAESKey, string memory iv, string memory fileName) {
+        for (uint i = 0; i < files.length; i++) {
+            if (keccak256(abi.encodePacked(files[i].cid)) == keccak256(abi.encodePacked(fileHash))) {
+                return (files[i].encryptedAESKey, files[i].iv, files[i].fileName);
+            }
+        }
+        revert("File not found");
+    }
+
+
     // Функция для получения общего количества предложений
     function getStorageOffersCount() public view returns (uint) {
         return storageOffers.length;

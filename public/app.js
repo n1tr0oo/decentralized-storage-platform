@@ -9,6 +9,7 @@ if (window.ethereum) {
             // Retrieve the user's address
             const userAddress = accounts[0];
             document.getElementById('userAddress').innerText = userAddress;
+            generateAndStoreKeyPair();
             initializePage();
         })
         .catch(error => console.error("Error connecting to MetaMask:", error));
@@ -18,11 +19,8 @@ if (window.ethereum) {
 
 
 
-// Import IpfsHttpClient and initialize IPFS client
-const { create } = window.IpfsHttpClient;
-const ipfs = create({ host: 'localhost', port: '5001', protocol: 'http' });
 
-const contractAddress = '0x9Dc066CC12B52191e1856E98198FD69Fdc88FBfb'; // Replace with your deployed contract address
+const contractAddress = '0x197e9D62e3e91BEB5CE8c319bd8B107B5426A490'; // Replace with your deployed contract address
 const contractABI = [
   {
     "inputs": [
@@ -308,6 +306,36 @@ const contractABI = [
     "constant": true
   },
   {
+    "inputs": [
+      {
+        "internalType": "string",
+        "name": "fileHash",
+        "type": "string"
+      }
+    ],
+    "name": "getFileData",
+    "outputs": [
+      {
+        "internalType": "string",
+        "name": "encryptedAESKey",
+        "type": "string"
+      },
+      {
+        "internalType": "string",
+        "name": "iv",
+        "type": "string"
+      },
+      {
+        "internalType": "string",
+        "name": "fileName",
+        "type": "string"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function",
+    "constant": true
+  },
+  {
     "inputs": [],
     "name": "getStorageOffersCount",
     "outputs": [
@@ -358,6 +386,47 @@ function initializePage() {
     } else if (window.location.pathname.includes('profile.html')) {
         loadProfilePage();
     }
+}
+
+
+// Function to generate and store key pair
+async function generateAndStoreKeyPair() {
+  const accounts = await web3.eth.getAccounts();
+  const userAddress = accounts[0];
+
+  const publicKeyKey = `${userAddress}_publicKey`;
+  const privateKeyKey = `${userAddress}_privateKey`;
+
+  if (localStorage.getItem(publicKeyKey) && localStorage.getItem(privateKeyKey)) {
+      console.log("Key pair already exists for this user.");
+      return;
+  }
+
+  try {
+      const keyPair = await window.crypto.subtle.generateKey(
+          {
+              name: "RSA-OAEP",
+              modulusLength: 2048,
+              publicExponent: new Uint8Array([1, 0, 1]),
+              hash: { name: "SHA-256" },
+          },
+          true,
+          ["encrypt", "decrypt"]
+      );
+
+      const publicKey = await window.crypto.subtle.exportKey("spki", keyPair.publicKey);
+      const publicKeyString = btoa(String.fromCharCode(...new Uint8Array(publicKey)));
+
+      const privateKey = await window.crypto.subtle.exportKey("pkcs8", keyPair.privateKey);
+      const privateKeyString = btoa(String.fromCharCode(...new Uint8Array(privateKey)));
+
+      localStorage.setItem(publicKeyKey, publicKeyString);
+      localStorage.setItem(privateKeyKey, privateKeyString);
+
+      console.log("Key pair generated and stored successfully.");
+  } catch (error) {
+      console.error("Error generating key pair:", error);
+  }
 }
 
 async function loadMyProvidedStorages() {
@@ -579,34 +648,16 @@ async function loadUserFiles() {
   try {
       const userFiles = await contract.methods.getUserFiles(accounts[0]).call();
       for (const file of userFiles) {
-          // Получение размера файла с использованием await
-          const fileSize = await getFileSizeFromCID(file.cid);
-
-          // Загрузка зашифрованного файла с IPFS
-          const response = await fetch(`http://localhost:8080/ipfs/${file.cid}`);
-          const encryptedFileContent = await response.arrayBuffer();
-
-          console.log("IV from file:", file.iv);
-          console.log("Encrypted AES Key from file:", file.encryptedAESKey);
-
-          // Расшифровка файла
-          const decryptedContent = await decryptFile(
-            new Uint8Array(encryptedFileContent),
-            base64ToUint8Array(file.encryptedAESKey), // Декодируйте зашифрованный AES-ключ
-            base64ToUint8Array(file.iv)               // Декодируйте IV
-          );
-        
-          // Создание элемента для скачивания расшифрованного файла
-          const blob = new Blob([decryptedContent], { type: "application/octet-stream" });
-          const url = URL.createObjectURL(blob);
-
-          // Создание элемента с информацией о файле
+          const fileSize = file.size / 100; // Размер в MB
+          const fileCid = encodeURIComponent(file.cid); // Хэш файла для идентификации
+          
+          // Создание элемента с информацией о файле и кнопкой для расшифровки и скачивания
           const fileElement = document.createElement('div');
           fileElement.className = "p-4 bg-white rounded shadow-md mb-4 border border-gray-200"; // Tailwind CSS классы
           fileElement.innerHTML = `
-            <div class="text-gray-800 font-semibold">${file.fileName || 'Unknown'}</div>
-            <div class="text-sm text-gray-600">Size: ${fileSize} MB</div>
-            <a href="${url}" download="${file.fileName}" class="text-blue-500 underline hover:text-blue-700">Download</a>
+              <div class="text-gray-800 font-semibold">${file.fileName || 'Unknown'}</div>
+              <div class="text-sm text-gray-600">Size: ${fileSize} MB</div>
+              <button onclick="downloadAndDecryptFile('${fileCid}')" class="text-blue-500 underline hover:text-blue-700">Download & Decrypt</button>
           `;
           userFilesContainer.appendChild(fileElement);
       }
@@ -614,6 +665,9 @@ async function loadUserFiles() {
       console.error("Error loading user files:", error);
   }
 }
+
+
+
 
 
 
@@ -743,35 +797,63 @@ async function uploadFile() {
           try {
               const publicKey = await getPublicKeyForEncryption();
               const aesKey = await generateAESKey();
+
               const { encryptedContent, iv } = await encryptFileWithAES(fileContent, aesKey);
               const encryptedAESKey = await encryptAESKey(aesKey, publicKey);
 
-              // Преобразование зашифрованного ключа AES и iv в правильный формат
               const ivBase64 = arrayBufferToBase64(iv);
               const encryptedAESKeyBase64 = arrayBufferToBase64(encryptedAESKey);
 
-              // Загрузка зашифрованного содержимого в IPFS
-              const added = await ipfs.add(encryptedContent);
-              const cid = added.path;
-              console.log("File uploaded to IPFS with CID:", cid);
+              // Проверка и логирование
+              console.log("Base64 AES Key:", encryptedAESKeyBase64);
+              console.log("Base64 IV:", ivBase64);
 
+              const encryptedBlob = new Blob([encryptedContent], { type: 'application/octet-stream' });
+              console.log("Encrypted Blob Size:", encryptedBlob.size);
 
-              // Сохранение данных в смарт-контракте
+              const formData = new FormData();
+              formData.append('file', encryptedBlob, fileInput.name);
+              formData.append('encryptedAESKeyBase64', encryptedAESKeyBase64);
+              formData.append('ivBase64', ivBase64);
+
+              console.log("FormData entries before upload:");
+              for (let pair of formData.entries()) {
+                  console.log(`${pair[0]}: ${pair[1]}`);
+              }
+
+              const response = await fetch('/upload', {
+                  method: 'POST',
+                  body: formData
+              });
+
+              console.log("Server response status:", response.status);
+              if (!response.ok) {
+                  const errorText = await response.text();
+                  console.error("Server response error:", errorText);
+                  throw new Error('Failed to upload file to server.');
+              }
+
+              const result = await response.json();
+              console.log("Upload result:", result);
+
+              const hash = result.hash;
               await contract.methods.uploadFile(
-                cid,
-                fileInput.name,
-                fileSizeInHundredths,
-                encryptedAESKeyBase64,
-                ivBase64
-            ).send({
-                from: userAddress,
-                gas: 6000000
-            });
-           
+                  hash,
+                  fileInput.name,
+                  fileSizeInHundredths,
+                  encryptedAESKeyBase64,
+                  ivBase64
+              ).send({
+                  from: userAddress,
+                  gas: 6000000
+              });
+
               alert("File uploaded successfully!");
               loadUserFiles();
           } catch (error) {
-              console.error("Error uploading file:", error);
+              console.error("Detailed Error:", error);
+              console.error("Error stack:", error.stack); // Добавление стека ошибки для отладки
+              console.error("Error message:", error.message);
               alert("Error uploading file: " + error.message);
           }
       };
@@ -780,8 +862,6 @@ async function uploadFile() {
       console.error("Error checking storage capacity:", error);
   }
 }
-
-
 
 
 // Функция для получения публичного ключа для шифрования
@@ -837,18 +917,17 @@ async function generateAESKey() {
       ["encrypt", "decrypt"]
   );
 }
+
 async function encryptFileWithAES(fileContent, aesKey) {
-  const iv = window.crypto.getRandomValues(new Uint8Array(12)); // Initialization vector
+  const iv = window.crypto.getRandomValues(new Uint8Array(12)); // 12 байтов для AES-GCM
   const encryptedContent = await window.crypto.subtle.encrypt(
-      {
-          name: "AES-GCM",
-          iv: iv
-      },
+      { name: "AES-GCM", iv: iv },
       aesKey,
       fileContent
   );
   return { encryptedContent: new Uint8Array(encryptedContent), iv: iv };
 }
+
 async function encryptAESKey(aesKey, publicKey) {
   const exportedAESKey = await window.crypto.subtle.exportKey("raw", aesKey);
   return await window.crypto.subtle.encrypt(
@@ -861,13 +940,16 @@ async function encryptAESKey(aesKey, publicKey) {
 }
 
 function base64ToUint8Array(base64) {
+  // Проверка: убедитесь, что строка Base64 не пустая
   if (!base64 || typeof base64 !== 'string') {
       console.error("Invalid Base64 input:", base64);
       throw new Error("Invalid Base64 string provided.");
   }
 
   try {
-      const binaryString = atob(base64);
+      // Очистка строки Base64 от пробелов и проверка на корректность
+      const cleanedBase64 = base64.replace(/\s+/g, '').replace(/[-_]/g, m => (m === '-' ? '+' : '/'));
+      const binaryString = atob(cleanedBase64);
       const len = binaryString.length;
       const bytes = new Uint8Array(len);
       for (let i = 0; i < len; i++) {
@@ -880,62 +962,144 @@ function base64ToUint8Array(base64) {
   }
 }
 
+
+
 function arrayBufferToBase64(buffer) {
-  let binary = '';
-  const bytes = new Uint8Array(buffer);
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
-      binary += String.fromCharCode(bytes[i]);
-  }
+  const binary = String.fromCharCode(...new Uint8Array(buffer));
   return btoa(binary);
 }
 
 
-async function decryptFile(encryptedContent, encryptedAESKey, iv) {
+async function decryptFile(encryptedContent, aesCryptoKey, iv) {
+  try {
+      console.log("Encrypted content size:", encryptedContent.byteLength);
+      console.log("IV size:", iv.byteLength);
+      
+      // Расшифровка содержимого файла с использованием уже расшифрованного AES ключа
+      const decryptedContent = await window.crypto.subtle.decrypt(
+          { name: "AES-GCM", iv: iv },
+          aesCryptoKey,
+          encryptedContent
+      );
+
+      return new Uint8Array(decryptedContent);
+  } catch (error) {
+      console.error("Error in decryptFile:", error);
+      throw error;
+  }
+}
+
+
+
+// Дополнительные вспомогательные функции
+async function decryptAESKey(encryptedAESKey) {
+  // Получаем адрес пользователя
   const accounts = await web3.eth.getAccounts();
   const userAddress = accounts[0];
+  
+  // Получаем приватный ключ из localStorage
   const privateKeyKey = `${userAddress}_privateKey`;
   const privateKeyString = localStorage.getItem(privateKeyKey);
-
+  
   if (!privateKeyString) {
-      throw new Error("Private key not found for decryption.");
+    throw new Error("Private key not found for decryption.");
   }
 
-  // Преобразование приватного ключа из строки в ключевой объект
-  const privateKeyBytes = base64ToUint8Array(privateKeyString).buffer;
+  // Преобразуем Base64 строку в Uint8Array и импортируем приватный ключ
+  const privateKeyBytes = Uint8Array.from(atob(privateKeyString), c => c.charCodeAt(0));
   const privateKey = await window.crypto.subtle.importKey(
-      "pkcs8",
-      privateKeyBytes,
-      { name: "RSA-OAEP", hash: { name: "SHA-256" } },
-      true,
-      ["decrypt"]
+    "pkcs8",
+    privateKeyBytes.buffer,
+    { name: "RSA-OAEP", hash: { name: "SHA-256" } },
+    true,
+    ["decrypt"]
   );
 
-  // Расшифровка ключа AES
-  const aesKey = await window.crypto.subtle.decrypt(
-      { name: "RSA-OAEP" },
-      privateKey,
-      encryptedAESKey.buffer
+  // Расшифровка AES-ключа с использованием приватного ключа
+  const decryptedAESKey = await window.crypto.subtle.decrypt(
+    {
+      name: "RSA-OAEP"
+    },
+    privateKey,
+    encryptedAESKey
   );
 
-  // Преобразование расшифрованного ключа AES в CryptoKey
-  const aesCryptoKey = await window.crypto.subtle.importKey(
-      "raw",
-      aesKey,
-      { name: "AES-GCM" },
-      true,
-      ["decrypt"]
+  // Импортируем расшифрованный AES-ключ как CryptoKey
+  return window.crypto.subtle.importKey(
+    "raw",
+    decryptedAESKey,
+    { name: "AES-GCM" },
+    true,
+    ["decrypt"]
   );
-
-  // Расшифровка содержимого файла с использованием AES
-  const decryptedContent = await window.crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: iv.buffer },
-      aesCryptoKey,
-      encryptedContent
-  );
-
-  return new Uint8Array(decryptedContent);
 }
+
+async function downloadAndDecryptFile(fileHash) {
+  console.log("downloadAndDecryptFile called with fileHash:", fileHash);
+  let fullFile = new Uint8Array();
+
+  try {
+      // Получаем данные файла, включая имя, из контракта
+      const fileData = await contract.methods.getFileData(fileHash).call();
+      const fileName = fileData.fileName; // Имя файла из контракта
+
+      if (!fileName) throw new Error("Не удалось получить имя файла из контракта.");
+
+      for (let i = 1; i <= 4; i++) {
+          try {
+              const response = await fetch(`/download/${fileHash}_part${i}`);
+              if (!response.ok) throw new Error(`Не удалось загрузить часть ${i}`);
+
+              const jsonResponse = await response.json();
+              const { encryptedContent, encryptedAESKeyBase64, ivBase64 } = jsonResponse;
+
+              // Проверка на отсутствие нужных данных
+              if (!encryptedContent || !encryptedAESKeyBase64 || !ivBase64) throw new Error(`Отсутствуют данные в части ${i}`);
+
+              const encryptedContentArray = base64ToUint8Array(encryptedContent);
+              const iv = base64ToUint8Array(ivBase64);
+              const encryptedAESKey = base64ToUint8Array(encryptedAESKeyBase64);
+              const aesKey = await decryptAESKey(encryptedAESKey);
+
+              console.log(`Расшифровка части ${i} с размером зашифрованного содержимого:`, encryptedContentArray.byteLength);
+
+              const decryptedContent = await decryptFile(encryptedContentArray, aesKey, iv);
+              fullFile = mergeUint8Arrays(fullFile, decryptedContent);
+          } catch (error) {
+              console.error(`Ошибка при загрузке и расшифровке части ${i}:`, error);
+              throw error;
+          }
+      }
+
+      // Создание ссылки для скачивания полного файла с оригинальным именем
+      const blob = new Blob([fullFile], { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName; // Используем имя файла из контракта
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+  } catch (error) {
+      console.error("Ошибка при загрузке и расшифровке файла:", error);
+      throw error;
+  }
+}
+
+
+// Вспомогательная функция для объединения двух массивов Uint8Array
+function mergeUint8Arrays(arr1, arr2) {
+  const mergedArray = new Uint8Array(arr1.length + arr2.length);
+  mergedArray.set(arr1);
+  mergedArray.set(arr2, arr1.length);
+  return mergedArray;
+}
+
+
+
+
+
+
 
 
 
